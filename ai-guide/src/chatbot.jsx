@@ -8,8 +8,9 @@ import {
   IconButton,
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
-import axios from "axios";
 import ChatIcon from "@mui/icons-material/Chat";
+import Joyride from "react-joyride";
+import axios from "axios";
 
 const modalStyle = {
   position: "fixed",
@@ -26,55 +27,140 @@ const modalStyle = {
   maxHeight: "80vh",
 };
 
-// Metadata extractor (for MUI & general UI)
+// Converts plain-text instructions into Joyride steps (best-effort)
+function parsePlainTextSteps(text) {
+  const steps = [];
+  const sentences = text
+    .split(/[.]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  sentences.forEach((sent) => {
+    // Click detection
+    if (sent.toLowerCase().includes("click")) {
+      let target = "";
+      const match = sent.match(/"([^"]+)"/); // text in quotes
+      if (match) target = match[1];
+      if (target) {
+        steps.push({
+          step: steps.length + 1,
+          action: "click",
+          targetText: target,
+        });
+      }
+    }
+    // Fill/Enter detection
+    if (
+      sent.toLowerCase().includes("fill") ||
+      sent.toLowerCase().includes("enter")
+    ) {
+      const match = sent.match(/"([^"]+)"/);
+      if (match) {
+        steps.push({
+          step: steps.length + 1,
+          action: "fill",
+          targetLabel: match[1],
+        });
+      }
+    }
+  });
+  return steps;
+}
+
+// Extract UI metadata (MUI-aware)
 function extractUIMetadata() {
   const path = window.location.pathname;
   const h1 = document.querySelector("h1,h2,h3");
   const pageTitle = (h1 ? h1.innerText : path).trim();
 
-  // MUI Table Headers
-  const columns = Array.from(document.querySelectorAll('[role="columnheader"]'))
+  const cols = Array.from(document.querySelectorAll('[role="columnheader"]'))
     .map((c) => c.innerText.trim())
     .filter(Boolean);
 
-  // Form labels (MuiInputLabel-root OR plain <label>)
-  const labelEls = Array.from(
+  const labels = Array.from(
     document.querySelectorAll(".MuiInputLabel-root, label")
-  );
-  const formLabels = labelEls.map((l) => l.innerText.trim()).filter(Boolean);
+  )
+    .map((l) => l.innerText.trim())
+    .filter(Boolean);
 
-  // visible button text
-  const textButtons = Array.from(document.querySelectorAll("button"))
+  const txtButtons = Array.from(document.querySelectorAll("button"))
     .map((b) => b.innerText.trim())
-    .filter((t) => t !== "");
+    .filter((t) => t);
 
-  // Detect icon-based buttons (aria-label/title)
-  const iconButtons = Array.from(document.querySelectorAll("button")).map(
-    (b) => {
-      const aria = b.getAttribute("aria-label") || "";
-      const title = b.getAttribute("title") || "";
-      return { ariaLabel: aria.trim(), title: title.trim() };
-    }
-  );
+  const icons = Array.from(document.querySelectorAll("button")).map((b) => {
+    const aria = b.getAttribute("aria-label") || "";
+    return { ariaLabel: aria.trim() };
+  });
 
   return {
-    pageTitle,
     currentPath: path,
-    tableHeaders: columns,
-    formLabels,
-    textButtons,
-    iconButtons,
+    pageTitle,
+    tableHeaders: cols,
+    formLabels: labels,
+    textButtons: txtButtons,
+    iconButtons: icons,
   };
 }
 
-export default function UIAssistantModal() {
+export default function ChatAssistantModal() {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const scrollRef = useRef();
+  const [pendingSecondPhase, setPendingSecondPhase] = useState([]);
+
+  // Joyride
+  const [joySteps, setJoySteps] = useState([]);
+  const [runJoyride, setRunJoyride] = useState(false);
 
   const handleOpen = () => setOpen(true);
   const handleClose = () => setOpen(false);
+
+  // Get GPT + JSON
+  // const sendMessage = async () => {
+  //   if (!input.trim()) return;
+  //   const userMsg = input.trim();
+  //   setMessages((prev) => [...prev, { role: "user", text: userMsg }]);
+  //   setInput("");
+
+  //   const meta = extractUIMetadata();
+
+  //   try {
+  //     const res = await axios.post("http://localhost:3000/assistant/message", {
+  //       userMessage: userMsg,
+  //       uiMetadata: meta
+  //     });
+
+  //     const raw = res.data.raw;
+  //     let steps = [];
+  //     let explanation = "";
+
+  //     // try to parse the reply into JSON
+  //     try {
+  //       const obj = JSON.parse(raw);
+  //       steps = obj.steps || [];
+  //       explanation = obj.explanation || "";
+  //     } catch (err) {
+  //       // fallback - raw text
+  //       explanation = raw;
+  //     }
+
+  //     setMessages((prev) => [
+  //       ...prev,
+  //       {
+  //         role: "assistant",
+  //         text: explanation,
+  //         steps // attach parsed steps for later
+  //       }
+  //     ]);
+  //   } catch (err) {
+  //     console.error(err);
+  //     setMessages((prev) => [
+  //       ...prev,
+  //       { role: "assistant", text: "Error contacting server." }
+  //     ]);
+  //   }
+  // };
 
   const sendMessage = async () => {
     if (!input.trim()) return;
@@ -82,15 +168,33 @@ export default function UIAssistantModal() {
     setMessages((prev) => [...prev, { role: "user", text: userMsg }]);
     setInput("");
 
-    const metadata = extractUIMetadata(); // collect UI context
+    const meta = extractUIMetadata();
 
     try {
       const res = await axios.post("http://localhost:3000/assistant/message", {
         userMessage: userMsg,
-        uiMetadata: metadata,
+        uiMetadata: meta,
       });
-      const reply = res.data.message;
-      setMessages((prev) => [...prev, { role: "assistant", text: reply }]);
+
+      // Always read res.data.raw if provided
+      const raw = res.data.raw || res.data.message || res.data;
+      let steps = [];
+      let explanation = "";
+
+      try {
+        const parsed = JSON.parse(raw);
+        steps = parsed.steps || [];
+        explanation = parsed.explanation || "";
+      } catch (err) {
+        // Plain text fallback:
+        explanation = raw;
+        steps = parsePlainTextSteps(raw); // << Convert plain text into steps array
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", text: explanation, steps },
+      ]);
     } catch (err) {
       console.error(err);
       setMessages((prev) => [
@@ -100,6 +204,81 @@ export default function UIAssistantModal() {
     }
   };
 
+  // Helper: find a DOM element button with exact text
+  function findButtonByText(text) {
+    const btns = Array.from(document.querySelectorAll("button"));
+    return btns.find(
+      (b) => b.innerText.trim().toLowerCase() === text.trim().toLowerCase()
+    );
+  }
+  function findFieldByLabel(labelText) {
+    const labels = Array.from(
+      document.querySelectorAll(".MuiInputLabel-root, label")
+    ).filter(
+      (l) => l.innerText.trim().toLowerCase() === labelText.toLowerCase()
+    );
+    return labels[0] || null;
+  }
+  // Joyride starter
+  const startVisualDemo = (stepsJson) => {
+    console.log(stepsJson, "stepsJson");
+    // Split into first click step vs. rest
+    let navFound = false;
+    const preNav = [];
+    const postNav = [];
+
+    stepsJson.forEach((st) => {
+      if (!navFound && st.action === "click") {
+        preNav.push(st);
+        navFound = true;
+      } else {
+        postNav.push(st);
+      }
+    });
+
+    // Prepare phase 1 steps (first click)
+    const joyFirst = preNav.map((st) => {
+      const el = findButtonByText(st.targetText);
+      return {
+        target: el || "body",
+        content: `Step ${st.step}: Click '${st.targetText}'`,
+      };
+    });
+
+    setJoySteps(joyFirst);
+    setRunJoyride(true);
+    setPendingSecondPhase(postNav); // store the rest
+  };
+  useEffect(() => {
+    // If we have pending 'postNav' steps and URL changed
+    if (pendingSecondPhase.length > 0) {
+      // Build steps for second page:
+      const secondJoySteps = pendingSecondPhase
+        .map((st) => {
+          if (st.action === "fill") {
+            const f = findFieldByLabel(st.targetLabel);
+            return {
+              target: f || "body",
+              content: `Fill '${st.targetLabel}'`,
+            };
+          }
+          if (st.action === "click") {
+            const b = findButtonByText(st.targetText);
+            return {
+              target: b || "body",
+              content: `Click '${st.targetText}'`,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
+
+      setJoySteps(secondJoySteps);
+      setRunJoyride(true);
+      setPendingSecondPhase([]); // clear
+    }
+  }, [window.location.pathname]);
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -108,6 +287,7 @@ export default function UIAssistantModal() {
 
   return (
     <>
+      {/* Floating chat bubble */}
       <Button
         variant="contained"
         onClick={handleOpen}
@@ -123,9 +303,23 @@ export default function UIAssistantModal() {
         <ChatIcon />
       </Button>
 
+      {/* Joyride Component */}
+      <Joyride
+        steps={joySteps}
+        run={runJoyride}
+        continuous
+        showSkipButton
+        showProgress
+        callback={(data) => {
+          if (data.status === "finished" || data.status === "skipped") {
+            setRunJoyride(false); // end tour
+          }
+        }}
+      />
+
+      {/* Chat Modal */}
       <Modal open={open} onClose={handleClose}>
         <Box sx={modalStyle}>
-          {/* Header with close */}
           <Box sx={{ display: "flex", justifyContent: "space-between", mb: 1 }}>
             <Typography variant="h6">UI Assistant</Typography>
             <IconButton size="small" onClick={handleClose}>
@@ -134,51 +328,52 @@ export default function UIAssistantModal() {
           </Box>
 
           {/* Chat history */}
-          <Box
-            ref={scrollRef}
-            sx={{
-              flex: 1,
-              overflowY: "auto",
-              border: "1px solid #eee",
-              p: 1,
-              mb: 1,
-              minHeight: "200px",
-            }}
-          >
-            {messages.length === 0 ? (
-              <Typography color="text.secondary">No messages yet.</Typography>
-            ) : (
-              messages.map((m, i) => (
+          <Box ref={scrollRef} sx={{ flex: 1, overflowY: "auto", mb: 1, p: 1 }}>
+            {messages.map((m, idx) => (
+              <Box
+                key={idx}
+                sx={{
+                  textAlign: m.role === "user" ? "right" : "left",
+                  mb: 1,
+                }}
+              >
                 <Box
-                  key={i}
                   sx={{
-                    textAlign: m.role === "user" ? "right" : "left",
-                    mb: 0.5,
+                    display: "inline-block",
+                    bgcolor: m.role === "user" ? "#e0f7fa" : "#f5f5f5",
+                    px: 1.5,
+                    py: 1,
+                    borderRadius: 1.5,
+                    maxWidth: "75%",
+                    textAlign: "left",
                   }}
                 >
-                  <Typography
-                    sx={{
-                      display: "inline-block",
-                      bgcolor: m.role === "user" ? "#e0f7fa" : "#f2f2f2",
-                      px: 1,
-                      py: 0.5,
-                      borderRadius: 1,
-                    }}
-                  >
-                    <b>{m.role}:</b> {m.text}
+                  <Typography variant="body2">
+                    <b>{m.role === "user" ? "User" : "Assistant"}:</b> {m.text}
                   </Typography>
+
+                  {/* If assistant message has steps, show link */}
+                  {m.role === "assistant" && m.steps && m.steps.length > 0 && (
+                    <Button
+                      size="small"
+                      onClick={() => startVisualDemo(m.steps)}
+                      sx={{ mt: 0.5 }}
+                    >
+                      Show Visual Demo
+                    </Button>
+                  )}
                 </Box>
-              ))
-            )}
+              </Box>
+            ))}
           </Box>
 
-          {/* Input area */}
+          {/* Input + Send */}
           <Box sx={{ display: "flex" }}>
             <TextField
-              placeholder="Type..."
               fullWidth
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              placeholder="Ask something..."
               onKeyDown={(e) => e.key === "Enter" && sendMessage()}
               size="small"
             />
