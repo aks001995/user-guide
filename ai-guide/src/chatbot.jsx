@@ -82,10 +82,13 @@ function extractUIMetadata() {
   )
     .map((l) => l.innerText.trim())
     .filter(Boolean);
-
+  const excludedButtons = ["SHOW VISUAL DEMO", "SEND"];
   const txtButtons = Array.from(document.querySelectorAll("button"))
     .map((b) => b.innerText.trim())
-    .filter((t) => t);
+    .filter((t) => t && !excludedButtons.includes(t.toUpperCase()));
+  // const txtButtons = Array.from(document.querySelectorAll("button"))
+  //   .map((b) => b.innerText.trim())
+  //   .filter((t) => t);
 
   const icons = Array.from(document.querySelectorAll("button")).map((b) => {
     const aria = b.getAttribute("aria-label") || "";
@@ -107,7 +110,6 @@ export default function ChatAssistantModal() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const scrollRef = useRef();
-  const [pendingSecondPhase, setPendingSecondPhase] = useState([]);
 
   // Joyride
   const [joySteps, setJoySteps] = useState([]);
@@ -115,52 +117,6 @@ export default function ChatAssistantModal() {
 
   const handleOpen = () => setOpen(true);
   const handleClose = () => setOpen(false);
-
-  // Get GPT + JSON
-  // const sendMessage = async () => {
-  //   if (!input.trim()) return;
-  //   const userMsg = input.trim();
-  //   setMessages((prev) => [...prev, { role: "user", text: userMsg }]);
-  //   setInput("");
-
-  //   const meta = extractUIMetadata();
-
-  //   try {
-  //     const res = await axios.post("http://localhost:3000/assistant/message", {
-  //       userMessage: userMsg,
-  //       uiMetadata: meta
-  //     });
-
-  //     const raw = res.data.raw;
-  //     let steps = [];
-  //     let explanation = "";
-
-  //     // try to parse the reply into JSON
-  //     try {
-  //       const obj = JSON.parse(raw);
-  //       steps = obj.steps || [];
-  //       explanation = obj.explanation || "";
-  //     } catch (err) {
-  //       // fallback - raw text
-  //       explanation = raw;
-  //     }
-
-  //     setMessages((prev) => [
-  //       ...prev,
-  //       {
-  //         role: "assistant",
-  //         text: explanation,
-  //         steps // attach parsed steps for later
-  //       }
-  //     ]);
-  //   } catch (err) {
-  //     console.error(err);
-  //     setMessages((prev) => [
-  //       ...prev,
-  //       { role: "assistant", text: "Error contacting server." }
-  //     ]);
-  //   }
-  // };
 
   const sendMessage = async () => {
     if (!input.trim()) return;
@@ -204,80 +160,62 @@ export default function ChatAssistantModal() {
     }
   };
 
-  // Helper: find a DOM element button with exact text
-  function findButtonByText(text) {
-    const btns = Array.from(document.querySelectorAll("button"));
-    return btns.find(
-      (b) => b.innerText.trim().toLowerCase() === text.trim().toLowerCase()
+  // Generic element finder by text
+  function findElementByText(text) {
+    // if (!text) return { element: document.body, actionType: "click" };
+
+    const lowerText = text.toLowerCase().trim();
+
+    // 1. Try buttons (by text or aria-label)
+    const buttonEl = Array.from(document.querySelectorAll("button")).find(
+      (b) =>
+        b.innerText.trim().toLowerCase() === lowerText ||
+        (b.getAttribute("aria-label") || "").trim().toLowerCase() === lowerText
     );
-  }
-  function findFieldByLabel(labelText) {
-    const labels = Array.from(
-      document.querySelectorAll(".MuiInputLabel-root, label")
-    ).filter(
-      (l) => l.innerText.trim().toLowerCase() === labelText.toLowerCase()
+    if (buttonEl) return { element: buttonEl, actionType: "click" };
+
+    // 2. Try links <a>
+    const linkEl = Array.from(document.querySelectorAll("a")).find(
+      (a) => a.innerText.trim().toLowerCase() === lowerText
     );
-    return labels[0] || null;
+    if (linkEl) return { element: linkEl, actionType: "click" };
+
+    // 3. Try input fields / textfields using associated labels
+    const labelEl = Array.from(
+      document.querySelectorAll("label, .MuiInputLabel-root")
+    ).find((l) => l.innerText.trim().toLowerCase() === lowerText);
+    if (labelEl) {
+      // Look for input/textarea/select inside same parent
+      const inputEl = labelEl.parentElement.querySelector(
+        "input, textarea, select"
+      );
+      return { element: inputEl || labelEl, actionType: "fill" };
+    }
+
+    // fallback
+    return { element: document.body, actionType: "click" };
   }
-  // Joyride starter
+
+  // Usage in startVisualDemo
   const startVisualDemo = (stepsJson) => {
-    console.log(stepsJson, "stepsJson");
-    // Split into first click step vs. rest
-    let navFound = false;
-    const preNav = [];
-    const postNav = [];
+    handleClose();
+    const joySteps = stepsJson.map((st) => {
+      const targetText = st.targetText || st.targetLabel || "";
+      const { element, actionType } = findElementByText(targetText);
 
-    stepsJson.forEach((st) => {
-      if (!navFound && st.action === "click") {
-        preNav.push(st);
-        navFound = true;
-      } else {
-        postNav.push(st);
-      }
-    });
-
-    // Prepare phase 1 steps (first click)
-    const joyFirst = preNav.map((st) => {
-      const el = findButtonByText(st.targetText);
       return {
-        target: el || "body",
-        content: `Step ${st.step}: Click '${st.targetText}'`,
+        target: element,
+        content: `Step ${st.step}: ${
+          actionType === "click" ? "Click" : "Fill"
+        } '${targetText}'`,
+        disableBeacon: true,
+        placement: "bottom",
       };
     });
 
-    setJoySteps(joyFirst);
+    setJoySteps(joySteps);
     setRunJoyride(true);
-    setPendingSecondPhase(postNav); // store the rest
   };
-  useEffect(() => {
-    // If we have pending 'postNav' steps and URL changed
-    if (pendingSecondPhase.length > 0) {
-      // Build steps for second page:
-      const secondJoySteps = pendingSecondPhase
-        .map((st) => {
-          if (st.action === "fill") {
-            const f = findFieldByLabel(st.targetLabel);
-            return {
-              target: f || "body",
-              content: `Fill '${st.targetLabel}'`,
-            };
-          }
-          if (st.action === "click") {
-            const b = findButtonByText(st.targetText);
-            return {
-              target: b || "body",
-              content: `Click '${st.targetText}'`,
-            };
-          }
-          return null;
-        })
-        .filter(Boolean);
-
-      setJoySteps(secondJoySteps);
-      setRunJoyride(true);
-      setPendingSecondPhase([]); // clear
-    }
-  }, [window.location.pathname]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -310,6 +248,20 @@ export default function ChatAssistantModal() {
         continuous
         showSkipButton
         showProgress
+        styles={{
+          options: {
+            zIndex: 99999, // Ensure the entire Joyride layer is on top
+          },
+          spotlight: {
+            zIndex: 100000, // Keep spotlight above headers/sidebars
+          },
+          beacon: {
+            zIndex: 100001, // Ensure the beacon/marker is always visible
+          },
+          tooltip: {
+            zIndex: 100002, // Ensure tooltip text stays above everything
+          },
+        }}
         callback={(data) => {
           if (data.status === "finished" || data.status === "skipped") {
             setRunJoyride(false); // end tour
@@ -353,10 +305,11 @@ export default function ChatAssistantModal() {
                   </Typography>
 
                   {/* If assistant message has steps, show link */}
-                  {m.role === "assistant" && m.steps && m.steps.length > 0 && (
+                  {/* {m.role === "assistant" && m.steps && m.steps.length > 0 && ( */}
+                  {m.role === "assistant" && (
                     <Button
                       size="small"
-                      onClick={() => startVisualDemo(m.steps)}
+                      onClick={() => startVisualDemo(m.steps, m.text)}
                       sx={{ mt: 0.5 }}
                     >
                       Show Visual Demo
